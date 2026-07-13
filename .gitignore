@@ -7,6 +7,8 @@ data/cores/*
 !data/cores/core-README.md
 !data/cores/package.json
 !data/cores/.npmignore
+!data/cores/dosbox_pure-thread-wasm.data
+!data/cores/dosbox_pure-thread-legacy-wasm.data
 .DS_Store
 .hintrc
 .vscode/*

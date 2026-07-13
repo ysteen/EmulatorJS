@@ -44,20 +44,42 @@ class EJS_GameManager {
         this.setupPreLoadSettings();
 
         this.EJS.on("exit", () => {
+            if (this.exitInProgress) return;
+            this.exitInProgress = true;
+
+            if (this.EJS.saveSaveInterval) {
+                clearInterval(this.EJS.saveSaveInterval);
+                this.EJS.saveSaveInterval = null;
+            }
+
             if (!this.EJS.failedToStart) {
-                this.saveSaveFiles();
-                this.functions.restart();
                 this.saveSaveFiles();
             }
             this.toggleMainLoop(0);
-            this.FS.unmount("/data/saves");
-            setTimeout(() => {
+
+            const finishExit = () => {
+                if (this.exitFinished) return;
+                this.exitFinished = true;
                 try {
-                    this.Module.abort();
-                } catch(e) {
-                    console.warn(e);
-                };
-            }, 1000);
+                    this.FS.unmount("/data/saves");
+                } catch (e) {
+                    if (this.EJS.debug) console.warn("Save filesystem unmount failed", e);
+                }
+                setTimeout(() => {
+                    try {
+                        this.Module.abort();
+                    } catch(e) {
+                        if (this.EJS.debug) console.warn(e);
+                    }
+                }, 0);
+            };
+
+            const waitForSaveSync = () => {
+                if (this.saveSyncInFlight) setTimeout(waitForSaveSync, 50);
+                else finishExit();
+            };
+            setTimeout(finishExit, 3000);
+            waitForSaveSync();
         })
     }
     setupPreLoadSettings() {
@@ -93,13 +115,14 @@ class EJS_GameManager {
                         try {
                             const url = this.EJS.config.externalFiles[key];
                             
+                            const extractToDirectory = key.trim().endsWith("/");
                             const cacheItem = await this.EJS.downloadFile(
                                 url,
                                 this.EJS.downloadType.support.name,
                                 null,          // progress callback
                                 true,          // notWithPath (URL is already absolute)
                                 { responseType: "arraybuffer" },  // opts (was null → causes crash)
-                                false,         // forceExtract
+                                extractToDirectory, // archives can be named .srm by host frontends
                                 this.EJS.downloadType.support.dontCache,
                                 false          // dontExtract
                             );
@@ -116,6 +139,9 @@ class EJS_GameManager {
                                 if (cacheItem.data.files.length > 0) {
                                     this.writeFile(path, cacheItem.data.files[0].bytes);
                                 }
+                            }
+                            if (path.startsWith("/data/saves")) {
+                                await new Promise((syncDone) => this.FS.syncfs(false, syncDone));
                             }
                             done();
                         } catch (e) {
@@ -424,7 +450,22 @@ IF EXIST AUTORUN.BAT CALL AUTORUN.BAT
     saveSaveFiles() {
         this.functions.saveSaveFiles();
         this.EJS.callEvent("saveSaveFiles", this.getSaveFile(false));
-        //this.FS.syncfs(false, () => {});
+        this.syncSaveFileSystem();
+    }
+    syncSaveFileSystem() {
+        if (this.saveSyncInFlight) {
+            this.saveSyncPending = true;
+            return;
+        }
+        this.saveSyncInFlight = true;
+        this.FS.syncfs(false, (error) => {
+            this.saveSyncInFlight = false;
+            if (error) console.error("Failed to persist /data/saves to IDBFS:", error);
+            if (this.saveSyncPending) {
+                this.saveSyncPending = false;
+                this.syncSaveFileSystem();
+            }
+        });
     }
     supportsStates() {
         return !!this.functions.supportsStates();
@@ -439,8 +480,87 @@ IF EXIST AUTORUN.BAT CALL AUTORUN.BAT
         if (save !== false) {
             this.saveSaveFiles();
         }
+        if (this.isDosBoxPure()) {
+            const bundle = this.createDosBoxPureSaveBundle();
+            if (bundle) return bundle;
+        }
         const exists = this.FS.analyzePath(this.getSaveFilePath()).exists;
         return (exists ? this.FS.readFile(this.getSaveFilePath()) : null);
+    }
+    isDosBoxPure() {
+        return ["dos", "dosbox_pure"].includes(this.EJS.getCore());
+    }
+    getDosBoxPureSaveFiles() {
+        const savePath = this.getSaveFilePath();
+        const saveName = savePath.split("/").pop();
+        const stem = saveName.includes(".") ? saveName.substring(0, saveName.lastIndexOf(".")) : saveName;
+        const root = "/data/saves";
+        const saveDirectory = savePath.substring(0, savePath.lastIndexOf("/")) || root;
+        const result = [];
+        if (!this.FS.analyzePath(saveDirectory).exists) return result;
+        for (const name of this.FS.readdir(saveDirectory)) {
+            if (name === "." || name === "..") continue;
+            const path = saveDirectory + "/" + name;
+            const stat = this.FS.stat(path);
+            if (!this.FS.isFile(stat.mode)) continue;
+            if (name === saveName || name.startsWith(stem + ".") || name.startsWith(stem + "-")) {
+                result.push({ name: path.substring(root.length + 1), bytes: this.FS.readFile(path) });
+            }
+        }
+        return result;
+    }
+    crc32(data) {
+        if (!EJS_GameManager.crcTable) {
+            EJS_GameManager.crcTable = new Uint32Array(256);
+            for (let n = 0; n < 256; n++) {
+                let c = n;
+                for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+                EJS_GameManager.crcTable[n] = c >>> 0;
+            }
+        }
+        let crc = 0xffffffff;
+        for (const value of data) crc = EJS_GameManager.crcTable[(crc ^ value) & 0xff] ^ (crc >>> 8);
+        return (crc ^ 0xffffffff) >>> 0;
+    }
+    createDosBoxPureSaveBundle() {
+        const files = this.getDosBoxPureSaveFiles();
+        if (!files.length) return null;
+        const encoder = new TextEncoder();
+        const entries = files.map((file) => ({
+            ...file,
+            fileName: encoder.encode(file.name),
+            crc: this.crc32(file.bytes)
+        }));
+        const localSize = entries.reduce((sum, file) => sum + 30 + file.fileName.length + file.bytes.length, 0);
+        const centralSize = entries.reduce((sum, file) => sum + 46 + file.fileName.length, 0);
+        const output = new Uint8Array(localSize + centralSize + 22);
+        const view = new DataView(output.buffer);
+        const write16 = (offset, value) => view.setUint16(offset, value, true);
+        const write32 = (offset, value) => view.setUint32(offset, value >>> 0, true);
+        let offset = 0;
+        for (const file of entries) {
+            file.offset = offset;
+            write32(offset, 0x04034b50); write16(offset + 4, 20); write16(offset + 6, 0x0800);
+            write16(offset + 8, 0); write16(offset + 10, 0); write16(offset + 12, 0);
+            write32(offset + 14, file.crc); write32(offset + 18, file.bytes.length); write32(offset + 22, file.bytes.length);
+            write16(offset + 26, file.fileName.length); write16(offset + 28, 0);
+            output.set(file.fileName, offset + 30); output.set(file.bytes, offset + 30 + file.fileName.length);
+            offset += 30 + file.fileName.length + file.bytes.length;
+        }
+        const centralOffset = offset;
+        for (const file of entries) {
+            write32(offset, 0x02014b50); write16(offset + 4, 20); write16(offset + 6, 20); write16(offset + 8, 0x0800);
+            write16(offset + 10, 0); write16(offset + 12, 0); write16(offset + 14, 0);
+            write32(offset + 16, file.crc); write32(offset + 20, file.bytes.length); write32(offset + 24, file.bytes.length);
+            write16(offset + 28, file.fileName.length); write16(offset + 30, 0); write16(offset + 32, 0);
+            write16(offset + 34, 0); write16(offset + 36, 0); write32(offset + 38, 0); write32(offset + 42, file.offset);
+            output.set(file.fileName, offset + 46);
+            offset += 46 + file.fileName.length;
+        }
+        write32(offset, 0x06054b50); write16(offset + 4, 0); write16(offset + 6, 0);
+        write16(offset + 8, entries.length); write16(offset + 10, entries.length);
+        write32(offset + 12, centralSize); write32(offset + 16, centralOffset); write16(offset + 20, 0);
+        return output;
     }
     loadSaveFiles() {
         this.clearEJSResetTimer();

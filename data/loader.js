@@ -188,7 +188,9 @@ const config = {
     softLoad: window.EJS_softLoad,
     capture: window.EJS_screenCapture,
     externalFiles: window.EJS_externalFiles,
-    dontExtractRom: window.EJS_dontExtractRom,
+    // DOSBox Pure must receive content archives intact so it can read native
+    // AUTOBOOT.DBP/DOS.YML metadata and disk images itself.
+    dontExtractRom: window.EJS_dontExtractRom ?? ["dos", "dosbox_pure"].includes(window.EJS_core),
     dontExtractBIOS: window.EJS_dontExtractBIOS,
     disableLocalStorage: window.EJS_disableLocalStorage,
     forceLegacyCores: window.EJS_forceLegacyCores,

@@ -1,0 +1,13 @@
+name: emulatorjs-dosbox-pure
+
+services:
+  emulatorjs:
+    image: emulatorjs-dosbox-pure:4.3.0-pre
+    build:
+      context: .
+      dockerfile: Dockerfile.dosbox-pure
+    restart: unless-stopped
+    ports:
+      - "${EJS_PORT:-8080}:8080"
+    volumes:
+      - ./roms:/usr/share/nginx/html/roms:ro
