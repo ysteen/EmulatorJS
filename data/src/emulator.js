@@ -851,10 +851,8 @@ class EmulatorJS {
     async initializeGameManager() {
         this.gameManager = new EJS_GameManager(this.Module, this);
         if (this.gameManager.isDosBoxPure()) {
-            if (!this.compression) this.compression = new EJS_COMPRESSION(this);
             await this.gameManager.mountFileSystems();
             await this.gameManager.loadExternalFiles();
-            await this.gameManager.restorePendingDosBoxPureSave();
         } else {
             await this.gameManager.loadExternalFiles();
             await this.gameManager.mountFileSystems();

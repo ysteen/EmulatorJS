@@ -1052,7 +1052,7 @@ class EJS_Frontend {
             savUrl = URL.createObjectURL(blob);
             const a = this.ejs.createElement("a");
             a.href = savUrl;
-            a.download = this.ejs.gameManager.getSaveFileName();
+            a.download = this.ejs.gameManager.getSaveFilePath().split("/").pop();
             a.click();
         });
         const loadSavFiles = addButton(this.ejs.config.buttonOpts.loadSavFiles, async () => {
@@ -1060,16 +1060,6 @@ class EJS_Frontend {
             if (called > 0) return;
             const file = await this.selectFile();
             const sav = new Uint8Array(await file.arrayBuffer());
-            if (this.ejs.gameManager.isDosBoxPure()) {
-                try {
-                    await this.ejs.gameManager.loadDosBoxPureSaveBundle(sav);
-                    this.displayMessage("Save imported. Reload this page to apply it.");
-                } catch (error) {
-                    console.error("Failed to import DOSBox Pure save:", error);
-                    this.displayMessage("Failed to import save", undefined, undefined, "error");
-                }
-                return;
-            }
             const path = this.ejs.gameManager.getSaveFilePath();
             const paths = path.split("/");
             let cp = "";
